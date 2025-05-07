@@ -46,10 +46,10 @@ This document outlines the architecture of our Voice-to-Voice Conversational AI 
 ## Data Flow
 
 1. User initiates voice interaction via web/mobile interface
-2. Voice input is captured and converted to text using Amazon Transcribe
+2. Voice input is captured and converted to text using Amazon Bedrock's Nova Sonic model with bidirectional streaming API
 3. Text is processed through Amazon Bedrock's Nova Sonic model
 4. Relevant information is retrieved from knowledge bases
-5. Response is generated and converted back to voice using Amazon Polly
+5. Response is generated and converted back to voice using Amazon Bedrock's Nova Sonic model with bidirectional streaming API
 6. Conversation history is stored in DynamoDB
 
 ## Deployment Architecture
