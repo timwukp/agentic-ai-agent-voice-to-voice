@@ -1,11 +1,11 @@
 const AWS = require('aws-sdk');
 const { v4: uuidv4 } = require('uuid');
+const { textToSpeechWithNovaSonic } = require('./nova-sonic-tts');
 
 // Initialize AWS services
 const bedrock = new AWS.BedrockRuntime();
 const dynamoDB = new AWS.DynamoDB.DocumentClient();
 const s3 = new AWS.S3();
-const polly = new AWS.Polly();
 const lambda = new AWS.Lambda();
 
 // Configuration
@@ -235,22 +235,17 @@ async function generateAIResponse(userInput, history, relevantKnowledge) {
 }
 
 /**
- * Convert text to speech using Amazon Polly
+ * Convert text to speech using Amazon Bedrock Nova Sonic
  */
-async function textToSpeech(text, voiceId = 'Joanna') {
+async function textToSpeech(text, voiceOptions = {}) {
     try {
-        const pollyResult = await polly.synthesizeSpeech({
-            OutputFormat: 'mp3',
-            SampleRate: '24000',
-            Text: text,
-            TextType: 'text',
-            VoiceId: voiceId,
-            Engine: 'neural'
-        }).promise();
-        
-        return Buffer.from(pollyResult.AudioStream).toString('base64');
+        // Use Nova Sonic for text-to-speech via bidirectional streaming
+        return await textToSpeechWithNovaSonic(text, {
+            voice: voiceOptions.voice || 'female',
+            speed: voiceOptions.speed || 1.0
+        });
     } catch (error) {
-        console.error('Error converting text to speech:', error);
+        console.error('Error converting text to speech with Nova Sonic:', error);
         throw error;
     }
 }

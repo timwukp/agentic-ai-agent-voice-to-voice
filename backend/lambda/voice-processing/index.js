@@ -1,9 +1,8 @@
 const AWS = require('aws-sdk');
 const { v4: uuidv4 } = require('uuid');
+const { transcribeAudioWithNovaSonic } = require('./nova-sonic-streaming');
 
 // Initialize AWS services
-const transcribe = new AWS.TranscribeService();
-const polly = new AWS.Polly();
 const s3 = new AWS.S3();
 const dynamoDB = new AWS.DynamoDB.DocumentClient();
 const lambda = new AWS.Lambda();
@@ -64,23 +63,17 @@ async function handleVoiceProcessing(event) {
             ContentType: 'audio/wav'
         }).promise();
         
-        // Start transcription job
-        const transcriptionJobName = `transcribe-${requestId}`;
-        
-        await transcribe.startTranscriptionJob({
-            TranscriptionJobName: transcriptionJobName,
-            Media: {
-                MediaFileUri: `s3://${AUDIO_BUCKET}/${s3Key}`
-            },
-            MediaFormat: 'wav',
-            LanguageCode: 'en-US',
-            OutputBucketName: AUDIO_BUCKET,
-            OutputKey: `transcripts/${userId}/${actualConversationId}/${requestId}.json`,
-            Settings: {
-                ShowSpeakerLabels: true,
-                MaxSpeakerLabels: 2
-            }
+        // Process audio directly with Nova Sonic instead of starting a transcription job
+        const s3Object = await s3.getObject({
+            Bucket: AUDIO_BUCKET,
+            Key: s3Key
         }).promise();
+        
+        // Use Nova Sonic for direct transcription with bidirectional streaming
+        const transcript = await transcribeAudioWithNovaSonic(s3Object.Body);
+        
+        // Generate a unique ID to maintain compatibility with existing code
+        const transcriptionId = `nova-sonic-${requestId}`;
         
         // Save conversation metadata
         await dynamoDB.put({
@@ -91,17 +84,30 @@ async function handleVoiceProcessing(event) {
                 userId,
                 sessionId,
                 requestId,
-                status: 'PROCESSING',
+                status: 'TRANSCRIBED', // Already transcribed with Nova Sonic
                 type: 'INPUT',
                 audioS3Path: s3Key,
-                transcriptionJobName
+                transcript: transcript
             }
         }).promise();
         
-        return formatResponse(202, { 
-            message: 'Audio processing started', 
+        // Immediately invoke Bedrock integration Lambda since we already have the transcript
+        await lambda.invoke({
+            FunctionName: 'BedrockIntegrationLambda',
+            InvocationType: 'Event', // Asynchronous invocation
+            Payload: JSON.stringify({
+                conversationId: actualConversationId,
+                userId,
+                requestId,
+                transcript
+            })
+        }).promise();
+
+        return formatResponse(200, { 
+            message: 'Audio processed successfully', 
             requestId,
-            conversationId: actualConversationId
+            conversationId: actualConversationId,
+            transcript
         });
     } catch (error) {
         console.error('Error processing audio:', error);
@@ -260,21 +266,26 @@ async function handleTranscriptionEventBridge(event) {
 /**
  * Converts text to speech using Amazon Polly
  */
+// This function is no longer needed as we use Nova Sonic in the Bedrock integration Lambda
+// Keeping a stub for backward compatibility
 async function textToSpeech(text, voiceId = 'Joanna') {
+    console.warn('Deprecated: Using local textToSpeech. Should use Nova Sonic from Bedrock integration.');
+    // Forward to Bedrock Lambda for Nova Sonic TTS
     try {
-        const pollyResult = await polly.synthesizeSpeech({
-            OutputFormat: 'mp3',
-            SampleRate: '24000',
-            Text: text,
-            TextType: 'text',
-            VoiceId: voiceId,
-            Engine: 'neural'
+        const lambdaResponse = await lambda.invoke({
+            FunctionName: 'BedrockIntegrationLambda',
+            InvocationType: 'RequestResponse',
+            Payload: JSON.stringify({
+                textToSpeechOnly: true,
+                text: text,
+                voiceOptions: { voice: voiceId === 'Joanna' ? 'female' : 'male' }
+            })
         }).promise();
         
-        // Return audio as base64
-        return Buffer.from(pollyResult.AudioStream).toString('base64');
+        const response = JSON.parse(lambdaResponse.Payload);
+        return response.audioBase64;
     } catch (error) {
-        console.error('Error converting text to speech:', error);
+        console.error('Error forwarding text-to-speech request:', error);
         throw error;
     }
 }
