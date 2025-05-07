@@ -1,0 +1,90 @@
+server:
+  port: 8080
+  servlet:
+    context-path: /
+  compression:
+    enabled: true
+  error:
+    include-message: always
+    include-binding-errors: always
+
+spring:
+  application:
+    name: voice-assistant
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${JWT_ISSUER_URI:https://cognito-idp.us-east-1.amazonaws.com/us-east-1_example}
+          jwk-set-uri: ${JWT_JWK_SET_URI:https://cognito-idp.us-east-1.amazonaws.com/us-east-1_example/.well-known/jwks.json}
+  cloud:
+    aws:
+      credentials:
+        profile-name: ${AWS_PROFILE:default}
+      region:
+        static: ${AWS_REGION:us-east-1}
+        auto: false
+
+aws:
+  region: ${AWS_REGION:us-east-1}
+  s3:
+    audio-bucket: ${AWS_AUDIO_BUCKET:voice-assistant-audio-storage}
+  lambda:
+    voice-processing-function: ${AWS_VOICE_PROCESSING_LAMBDA:VoiceProcessingLambda}
+    bedrock-integration-function: ${AWS_BEDROCK_INTEGRATION_LAMBDA:BedrockIntegrationLambda}
+    websocket-handler-function: ${AWS_WEBSOCKET_HANDLER_LAMBDA:WebSocketHandlerLambda}
+  dynamodb:
+    conversation-table: ${AWS_CONVERSATION_TABLE:ConversationTable}
+    user-session-table: ${AWS_USER_SESSION_TABLE:UserSessionTable}
+
+management:
+  endpoints:
+    web:
+      base-path: /actuator
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: when_authorized
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+
+logging:
+  level:
+    root: INFO
+    com.voiceassistant: DEBUG
+    org.springframework.web: INFO
+    org.springframework.security: INFO
+    org.springframework.web.socket: DEBUG
+    software.amazon.awssdk: INFO
+
+# OpenAPI documentation
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operationsSorter: method
+    tagsSorter: alpha
+    disable-swagger-default-url: true
+
+# Application-specific settings
+voice-assistant:
+  audio:
+    allowed-formats: wav,mp3
+    max-duration-seconds: 60
+    max-size-bytes: 10485760  # 10 MB
+  bedrock:
+    model-id: anthropic.claude-3-sonnet-20240229-v1:0
+    temperature: 0.7
+  security:
+    cors:
+      allowed-origins: '*'
+      allowed-methods: GET,POST,PUT,DELETE,OPTIONS
+      allowed-headers: Authorization,Content-Type,X-Requested-With
