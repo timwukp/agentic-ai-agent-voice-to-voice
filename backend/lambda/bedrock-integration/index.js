@@ -1,12 +1,16 @@
 const AWS = require('aws-sdk');
 const { v4: uuidv4 } = require('uuid');
 const { textToSpeechWithNovaSonic } = require('./nova-sonic-tts');
+const AWSXRay = require('aws-xray-sdk');
+
+// Instrument AWS SDK with X-Ray
+const XRayAWS = AWSXRay.captureAWS(AWS);
 
 // Initialize AWS services
-const bedrock = new AWS.BedrockRuntime();
-const dynamoDB = new AWS.DynamoDB.DocumentClient();
-const s3 = new AWS.S3();
-const lambda = new AWS.Lambda();
+const bedrock = new XRayAWS.BedrockRuntime();
+const dynamoDB = new XRayAWS.DynamoDB.DocumentClient();
+const s3 = new XRayAWS.S3();
+const lambda = new XRayAWS.Lambda();
 
 // Configuration
 const CONVERSATION_TABLE = process.env.CONVERSATION_TABLE;
@@ -22,12 +26,21 @@ const NOVA_SONIC_MODEL_ID = 'anthropic.claude-3-sonnet-20240229-v1:0';
  * Main Lambda handler for Bedrock integration
  */
 exports.handler = async (event) => {
+    // Create a new segment for the Lambda function
+    const segment = AWSXRay.getSegment();
+    
     console.log('Received event:', JSON.stringify(event));
     
     try {
         const { conversationId, userId, requestId, transcript } = event;
         
+        // Add annotations for X-Ray
+        segment.addAnnotation('userId', userId || 'anonymous');
+        segment.addAnnotation('hasConversationId', !!conversationId);
+        segment.addAnnotation('hasTranscript', !!transcript);
+        
         if (!conversationId || !transcript) {
+            segment.addAnnotation('error', 'missing_required_parameters');
             console.error('Missing required parameters');
             return { 
                 statusCode: 400, 
@@ -35,17 +48,44 @@ exports.handler = async (event) => {
             };
         }
         
+        // Add metadata for X-Ray
+        segment.addMetadata('requestId', requestId);
+        segment.addMetadata('conversationId', conversationId);
+        
+        // Create a subsegment for conversation history retrieval
+        const historySubsegment = segment.addNewSubsegment('GetConversationHistory');
+        
         // Get conversation history
         const history = await getConversationHistory(conversationId);
+        
+        historySubsegment.close();
+        
+        // Create a subsegment for knowledge retrieval
+        const knowledgeSubsegment = segment.addNewSubsegment('RetrieveKnowledge');
         
         // Retrieve relevant knowledge from the knowledge base
         const relevantKnowledge = await retrieveRelevantKnowledge(transcript);
         
+        knowledgeSubsegment.close();
+        
+        // Create a subsegment for AI response generation
+        const aiResponseSubsegment = segment.addNewSubsegment('GenerateAIResponse');
+        
         // Generate response using Nova Sonic model
         const aiResponse = await generateAIResponse(transcript, history, relevantKnowledge);
         
+        aiResponseSubsegment.close();
+        
+        // Create a subsegment for text-to-speech conversion
+        const ttsSubsegment = segment.addNewSubsegment('TextToSpeech');
+        
         // Convert response to speech
         const audioBase64 = await textToSpeech(aiResponse);
+        
+        ttsSubsegment.close();
+        
+        // Create a subsegment for S3 operations
+        const s3Subsegment = segment.addNewSubsegment('S3-PutObject');
         
         // Save audio to S3
         const s3Key = `output/${userId}/${conversationId}/${requestId}-response.mp3`;
@@ -55,6 +95,11 @@ exports.handler = async (event) => {
             Body: Buffer.from(audioBase64, 'base64'),
             ContentType: 'audio/mpeg'
         }).promise();
+        
+        s3Subsegment.close();
+        
+        // Create a subsegment for DynamoDB operations
+        const dynamoSubsegment = segment.addNewSubsegment('DynamoDB-PutItem');
         
         // Save response in DynamoDB
         const timestamp = Date.now();
@@ -72,6 +117,11 @@ exports.handler = async (event) => {
             }
         }).promise();
         
+        dynamoSubsegment.close();
+        
+        // Create a subsegment for WebSocket notification
+        const wsSubsegment = segment.addNewSubsegment('NotifyWebSocket');
+        
         // Send real-time update via WebSocket
         await notifyWebSocket(userId, conversationId, {
             type: 'AI_RESPONSE',
@@ -82,6 +132,8 @@ exports.handler = async (event) => {
             timestamp
         });
         
+        wsSubsegment.close();
+        
         return { 
             statusCode: 200, 
             body: JSON.stringify({
@@ -91,6 +143,7 @@ exports.handler = async (event) => {
             })
         };
     } catch (error) {
+        segment.addError(error);
         console.error('Error processing request:', error);
         return { 
             statusCode: 500, 

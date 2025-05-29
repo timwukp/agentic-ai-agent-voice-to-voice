@@ -151,6 +151,7 @@ export class VoiceAssistantStack extends cdk.Stack {
       assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
       managedPolicies: [
         iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+        iam.ManagedPolicy.fromAwsManagedPolicyName('AWSXRayDaemonWriteAccess'), // Add X-Ray permissions
       ],
     });
 
@@ -179,6 +180,7 @@ export class VoiceAssistantStack extends cdk.Stack {
       },
       vpc,
       role: bedrockRole,
+      tracing: lambda.Tracing.ACTIVE, // Enable X-Ray tracing
     });
 
     // Lambda function for Bedrock integration
@@ -195,6 +197,7 @@ export class VoiceAssistantStack extends cdk.Stack {
       },
       vpc,
       role: bedrockRole,
+      tracing: lambda.Tracing.ACTIVE, // Enable X-Ray tracing
     });
 
     // Lambda function for WebSocket handling
@@ -209,6 +212,7 @@ export class VoiceAssistantStack extends cdk.Stack {
         REGION: cdk.Stack.of(this).region,
       },
       vpc,
+      tracing: lambda.Tracing.ACTIVE, // Enable X-Ray tracing
     });
 
     // Grant permissions
@@ -226,6 +230,7 @@ export class VoiceAssistantStack extends cdk.Stack {
         loggingLevel: apigateway.MethodLoggingLevel.INFO,
         dataTraceEnabled: true,
         metricsEnabled: true,
+        tracingEnabled: true, // Enable X-Ray tracing
       },
       defaultCorsPreflightOptions: {
         allowOrigins: apigateway.Cors.ALL_ORIGINS,
@@ -281,6 +286,20 @@ export class VoiceAssistantStack extends cdk.Stack {
       cpu: 1024,
     });
 
+    // Add X-Ray permissions to the task execution role
+    taskDefinition.addToExecutionRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'xray:PutTraceSegments',
+          'xray:PutTelemetryRecords',
+          'xray:GetSamplingRules',
+          'xray:GetSamplingTargets',
+          'xray:GetSamplingStatisticSummaries',
+        ],
+        resources: ['*'],
+      })
+    );
+
     const springBootContainer = taskDefinition.addContainer('SpringBootContainer', {
       image: ecs.ContainerImage.fromEcrRepository(ecrRepo, 'latest'),
       essential: true,
@@ -289,6 +308,7 @@ export class VoiceAssistantStack extends cdk.Stack {
         USER_SESSION_TABLE: userSessionTable.tableName,
         OPENSEARCH_DOMAIN: openSearchDomain.domainEndpoint,
         REGION: cdk.Stack.of(this).region,
+        AWS_XRAY_CONTEXT_MISSING: 'LOG_ERROR', // X-Ray configuration
       },
       logging: new ecs.AwsLogDriver({
         logGroup: backendLogGroup,

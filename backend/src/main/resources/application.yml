@@ -28,6 +28,8 @@ spring:
       region:
         static: ${AWS_REGION:us-east-1}
         auto: false
+      xray:
+        enabled: true
 
 aws:
   region: ${AWS_REGION:us-east-1}
@@ -53,6 +55,12 @@ management:
   metrics:
     export:
       prometheus:
+        enabled: true
+  tracing:
+    sampling:
+      probability: 1.0
+    baggage:
+      correlation:
         enabled: true
 
 logging:
