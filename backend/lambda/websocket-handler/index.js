@@ -1,9 +1,13 @@
 const AWS = require('aws-sdk');
 const { v4: uuidv4 } = require('uuid');
+const AWSXRay = require('aws-xray-sdk');
+
+// Instrument AWS SDK with X-Ray
+const XRayAWS = AWSXRay.captureAWS(AWS);
 
 // Initialize AWS services
-const dynamoDB = new AWS.DynamoDB.DocumentClient();
-const apiGateway = new AWS.ApiGatewayManagementApi();
+const dynamoDB = new XRayAWS.DynamoDB.DocumentClient();
+const apiGateway = new XRayAWS.ApiGatewayManagementApi();
 
 // Constants
 const USER_SESSION_TABLE = process.env.USER_SESSION_TABLE;
@@ -13,6 +17,9 @@ const REGION = process.env.REGION || 'us-east-1';
  * Main Lambda handler for WebSocket events
  */
 exports.handler = async (event) => {
+    // Create a new segment for the Lambda function
+    const segment = AWSXRay.getSegment();
+    
     console.log('Received event:', JSON.stringify(event));
     
     // Set the API Gateway endpoint based on the event
@@ -26,22 +33,33 @@ exports.handler = async (event) => {
             const connectionId = event.requestContext.connectionId;
             const routeKey = event.requestContext.routeKey;
             
+            // Add annotations for X-Ray
+            segment.addAnnotation('connectionId', connectionId);
+            segment.addAnnotation('routeKey', routeKey);
+            
             switch (routeKey) {
                 case '$connect':
-                    return await handleConnect(event);
+                    return await handleConnect(event, segment);
                 case '$disconnect':
-                    return await handleDisconnect(connectionId);
+                    return await handleDisconnect(connectionId, segment);
                 case '$default':
-                    return await handleDefault(connectionId, event.body);
+                    return await handleDefault(connectionId, event.body, segment);
                 default:
                     return { statusCode: 400, body: 'Unsupported route' };
             }
         } else if (event.action === 'sendMessage') {
-            return await broadcastMessage(event);
+            // Add annotations for X-Ray
+            segment.addAnnotation('action', 'sendMessage');
+            segment.addAnnotation('userId', event.userId || 'unknown');
+            segment.addAnnotation('conversationId', event.conversationId || 'unknown');
+            
+            return await broadcastMessage(event, segment);
         } else {
+            segment.addAnnotation('error', 'unsupported_event_type');
             return { statusCode: 400, body: 'Unsupported event type' };
         }
     } catch (error) {
+        segment.addError(error);
         console.error('Error processing WebSocket event:', error);
         return { statusCode: 500, body: JSON.stringify({ error: 'Internal server error' }) };
     }
@@ -50,14 +68,22 @@ exports.handler = async (event) => {
 /**
  * Handle WebSocket connection events
  */
-async function handleConnect(event) {
+async function handleConnect(event, parentSegment) {
+    // Create a subsegment for connection handling
+    const subsegment = parentSegment.addNewSubsegment('handleConnect');
+    
     try {
         const connectionId = event.requestContext.connectionId;
         const queryParams = event.queryStringParameters || {};
         const userId = queryParams.userId;
         
+        // Add annotations for X-Ray
+        subsegment.addAnnotation('userId', userId || 'anonymous');
+        
         if (!userId) {
+            subsegment.addAnnotation('error', 'missing_userId');
             console.error('Missing userId in connection request');
+            subsegment.close();
             return { statusCode: 400, body: 'Missing userId parameter' };
         }
         
@@ -65,6 +91,9 @@ async function handleConnect(event) {
         const timestamp = Date.now();
         const sessionId = uuidv4();
         const ttl = Math.floor(timestamp / 1000) + 86400; // 24 hours expiration
+        
+        // Create a nested subsegment for DynamoDB operations
+        const dynamoSubsegment = subsegment.addNewSubsegment('DynamoDB-PutItem');
         
         await dynamoDB.put({
             TableName: USER_SESSION_TABLE,
@@ -78,10 +107,15 @@ async function handleConnect(event) {
             }
         }).promise();
         
+        dynamoSubsegment.close();
+        
         console.log(`Connection established for user ${userId} with connection ID ${connectionId}`);
+        subsegment.close();
         return { statusCode: 200, body: 'Connected' };
     } catch (error) {
+        subsegment.addError(error);
         console.error('Error handling WebSocket connection:', error);
+        subsegment.close();
         return { statusCode: 500, body: 'Failed to connect: ' + error.message };
     }
 }

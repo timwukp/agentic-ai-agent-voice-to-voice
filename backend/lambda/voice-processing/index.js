@@ -1,11 +1,15 @@
 const AWS = require('aws-sdk');
 const { v4: uuidv4 } = require('uuid');
 const { transcribeAudioWithNovaSonic } = require('./nova-sonic-streaming');
+const AWSXRay = require('aws-xray-sdk');
+
+// Instrument AWS SDK with X-Ray
+const XRayAWS = AWSXRay.captureAWS(AWS);
 
 // Initialize AWS services
-const s3 = new AWS.S3();
-const dynamoDB = new AWS.DynamoDB.DocumentClient();
-const lambda = new AWS.Lambda();
+const s3 = new XRayAWS.S3();
+const dynamoDB = new XRayAWS.DynamoDB.DocumentClient();
+const lambda = new XRayAWS.Lambda();
 
 // S3 bucket for temporary audio storage
 const AUDIO_BUCKET = process.env.AUDIO_BUCKET || 'voice-assistant-audio-storage';
@@ -16,16 +20,19 @@ const CONVERSATION_TABLE = process.env.CONVERSATION_TABLE;
  * Main Lambda handler for processing voice input
  */
 exports.handler = async (event) => {
+    // Create a new segment for the Lambda function
+    const segment = AWSXRay.getSegment();
+    
     try {
         console.log('Received event:', JSON.stringify(event));
         
         // Handle different event sources
         if (event.httpMethod === 'POST' && event.path === '/voice/process') {
-            return await handleVoiceProcessing(event);
+            return await handleVoiceProcessing(event, segment);
         } else if (event.Records && event.Records[0]?.s3) {
-            return await handleTranscriptionComplete(event);
+            return await handleTranscriptionComplete(event, segment);
         } else if (event.detail?.status === 'COMPLETED' && event.source === 'aws.transcribe') {
-            return await handleTranscriptionEventBridge(event);
+            return await handleTranscriptionEventBridge(event, segment);
         } else {
             return formatResponse(400, { error: 'Unsupported event type' });
         }
@@ -38,80 +45,125 @@ exports.handler = async (event) => {
 /**
  * Handles voice processing requests from API Gateway
  */
-async function handleVoiceProcessing(event) {
-    // Parse the incoming request
-    const body = JSON.parse(event.body);
-    const { audioData, userId, sessionId, conversationId } = body;
-    
-    if (!audioData) {
-        return formatResponse(400, { error: 'Missing audioData in request body' });
-    }
-
-    // Generate a unique ID for this request
-    const requestId = uuidv4();
-    const actualConversationId = conversationId || uuidv4();
+async function handleVoiceProcessing(event, parentSegment) {
+    // Create a subsegment for voice processing
+    const subsegment = parentSegment.addNewSubsegment('handleVoiceProcessing');
     
     try {
-        // Decode and save the audio data to S3
-        const buffer = Buffer.from(audioData, 'base64');
-        const s3Key = `input/${userId}/${actualConversationId}/${requestId}.wav`;
+        // Parse the incoming request
+        const body = JSON.parse(event.body);
+        const { audioData, userId, sessionId, conversationId } = body;
         
-        await s3.putObject({
-            Bucket: AUDIO_BUCKET,
-            Key: s3Key,
-            Body: buffer,
-            ContentType: 'audio/wav'
-        }).promise();
+        // Add annotations for X-Ray
+        subsegment.addAnnotation('userId', userId || 'anonymous');
+        subsegment.addAnnotation('hasConversationId', !!conversationId);
         
-        // Process audio directly with Nova Sonic instead of starting a transcription job
-        const s3Object = await s3.getObject({
-            Bucket: AUDIO_BUCKET,
-            Key: s3Key
-        }).promise();
-        
-        // Use Nova Sonic for direct transcription with bidirectional streaming
-        const transcript = await transcribeAudioWithNovaSonic(s3Object.Body);
-        
-        // Generate a unique ID to maintain compatibility with existing code
-        const transcriptionId = `nova-sonic-${requestId}`;
-        
-        // Save conversation metadata
-        await dynamoDB.put({
-            TableName: CONVERSATION_TABLE,
-            Item: {
-                conversationId: actualConversationId,
-                timestamp: Date.now(),
-                userId,
-                sessionId,
-                requestId,
-                status: 'TRANSCRIBED', // Already transcribed with Nova Sonic
-                type: 'INPUT',
-                audioS3Path: s3Key,
-                transcript: transcript
-            }
-        }).promise();
-        
-        // Immediately invoke Bedrock integration Lambda since we already have the transcript
-        await lambda.invoke({
-            FunctionName: 'BedrockIntegrationLambda',
-            InvocationType: 'Event', // Asynchronous invocation
-            Payload: JSON.stringify({
-                conversationId: actualConversationId,
-                userId,
-                requestId,
-                transcript
-            })
-        }).promise();
+        if (!audioData) {
+            subsegment.addAnnotation('error', 'missing_audio_data');
+            return formatResponse(400, { error: 'Missing audioData in request body' });
+        }
 
-        return formatResponse(200, { 
-            message: 'Audio processed successfully', 
-            requestId,
-            conversationId: actualConversationId,
-            transcript
-        });
+        // Generate a unique ID for this request
+        const requestId = uuidv4();
+        const actualConversationId = conversationId || uuidv4();
+        
+        // Add metadata for X-Ray
+        subsegment.addMetadata('requestId', requestId);
+        subsegment.addMetadata('conversationId', actualConversationId);
+        
+        try {
+            // Create a nested subsegment for S3 operations
+            const s3Subsegment = subsegment.addNewSubsegment('S3-PutObject');
+            
+            // Decode and save the audio data to S3
+            const buffer = Buffer.from(audioData, 'base64');
+            const s3Key = `input/${userId}/${actualConversationId}/${requestId}.wav`;
+            
+            await s3.putObject({
+                Bucket: AUDIO_BUCKET,
+                Key: s3Key,
+                Body: buffer,
+                ContentType: 'audio/wav'
+            }).promise();
+            
+            s3Subsegment.close();
+            
+            // Create a nested subsegment for S3 get operation
+            const s3GetSubsegment = subsegment.addNewSubsegment('S3-GetObject');
+            
+            // Process audio directly with Nova Sonic instead of starting a transcription job
+            const s3Object = await s3.getObject({
+                Bucket: AUDIO_BUCKET,
+                Key: s3Key
+            }).promise();
+            
+            s3GetSubsegment.close();
+            
+            // Create a nested subsegment for transcription
+            const transcribeSubsegment = subsegment.addNewSubsegment('NovaTranscription');
+            
+            // Use Nova Sonic for direct transcription with bidirectional streaming
+            const transcript = await transcribeAudioWithNovaSonic(s3Object.Body);
+            
+            transcribeSubsegment.close();
+            
+            // Generate a unique ID to maintain compatibility with existing code
+            const transcriptionId = `nova-sonic-${requestId}`;
+            
+            // Create a nested subsegment for DynamoDB operations
+            const dynamoSubsegment = subsegment.addNewSubsegment('DynamoDB-PutItem');
+            
+            // Save conversation metadata
+            await dynamoDB.put({
+                TableName: CONVERSATION_TABLE,
+                Item: {
+                    conversationId: actualConversationId,
+                    timestamp: Date.now(),
+                    userId,
+                    sessionId,
+                    requestId,
+                    status: 'TRANSCRIBED', // Already transcribed with Nova Sonic
+                    type: 'INPUT',
+                    audioS3Path: s3Key,
+                    transcript: transcript
+                }
+            }).promise();
+            
+            dynamoSubsegment.close();
+            
+            // Create a nested subsegment for Lambda invocation
+            const lambdaSubsegment = subsegment.addNewSubsegment('Lambda-Invoke');
+            
+            // Immediately invoke Bedrock integration Lambda since we already have the transcript
+            await lambda.invoke({
+                FunctionName: 'BedrockIntegrationLambda',
+                InvocationType: 'Event', // Asynchronous invocation
+                Payload: JSON.stringify({
+                    conversationId: actualConversationId,
+                    userId,
+                    requestId,
+                    transcript
+                })
+            }).promise();
+            
+            lambdaSubsegment.close();
+
+            subsegment.close();
+            return formatResponse(200, { 
+                message: 'Audio processed successfully', 
+                requestId,
+                conversationId: actualConversationId,
+                transcript
+            });
+        } catch (error) {
+            subsegment.addError(error);
+            console.error('Error processing audio:', error);
+            return formatResponse(500, { error: 'Error processing audio', details: error.message });
+        }
     } catch (error) {
-        console.error('Error processing audio:', error);
-        return formatResponse(500, { error: 'Error processing audio', details: error.message });
+        subsegment.addError(error);
+        subsegment.close();
+        throw error;
     }
 }
 

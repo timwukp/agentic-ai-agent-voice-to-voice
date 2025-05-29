@@ -1,0 +1,41 @@
+{
+  "version": 2,
+  "rules": [
+    {
+      "description": "Voice processing endpoints",
+      "host": "*",
+      "http_method": "*",
+      "url_path": "/voice/*",
+      "fixed_target": 1,
+      "rate": 1.0
+    },
+    {
+      "description": "WebSocket connections",
+      "host": "*",
+      "http_method": "*",
+      "url_path": "/ws/*",
+      "fixed_target": 1,
+      "rate": 1.0
+    },
+    {
+      "description": "Health checks",
+      "host": "*",
+      "http_method": "*",
+      "url_path": "/actuator/health",
+      "fixed_target": 0,
+      "rate": 0.0
+    },
+    {
+      "description": "Default rule",
+      "host": "*",
+      "http_method": "*",
+      "url_path": "*",
+      "fixed_target": 1,
+      "rate": 0.5
+    }
+  ],
+  "default": {
+    "fixed_target": 1,
+    "rate": 0.1
+  }
+}
